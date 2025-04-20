@@ -1,0 +1,134 @@
+name: CH2 Build Workflow
+
+on:
+  workflow_call:
+
+jobs:
+  # ✅ Determine the target environment based on branch name
+  set-environment:
+    runs-on: ubuntu-latest
+    outputs:
+      gh-env: ${{ steps.set-env.outputs.env-name }}
+    steps:
+      - name: Set environment
+        id: set-env
+        run: |
+          if [[ "${{ github.ref_name }}" == "develop" ]]; then
+            echo "env-name=dev" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref_name }}" == "uat" ]]; then
+            echo "env-name=uat" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref_name }}" == "main" ]]; then
+            echo "env-name=prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "env-name=unknown" >> "$GITHUB_OUTPUT"
+          fi
+
+  # 🔧 Build and optionally publish the asset
+  build:
+    needs: [set-environment]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.set-environment.outputs.gh-env }}
+
+    steps:
+      # 📥 Checkout code
+      - uses: actions/checkout@v3
+
+      # 📦 Cache Maven dependencies
+      - uses: actions/cache@v3
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      # ☕ Setup Java 17
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      # 🔍 Extract asset info from pom.xml
+      - name: Extract asset parameters
+        run: |
+          groupId=$(mvn help:evaluate -Dexpression=project.groupId -q -DforceStdout)
+          assetId=$(mvn help:evaluate -Dexpression=project.artifactId -q -DforceStdout)
+          version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "assetGroup=$groupId" >> "$GITHUB_ENV"
+          echo "assetId=$assetId" >> "$GITHUB_ENV"
+          echo "assetVersion=$version" >> "$GITHUB_ENV"
+          echo "group = $groupId, assetId = $assetId, version = $version"
+
+      # 🧪 Check if version already exists in Exchange
+      - name: Check if asset exists
+        run: |
+          token=$(curl -s --location --request POST 'https://anypoint.mulesoft.com/accounts/api/v3/oauth2/token' \
+            --header 'Content-Type: application/json' \
+            --data-raw '{"client_id": "${{ secrets.CA_CLIENTID }}", "client_secret": "${{ secrets.CA_CLIENTSECRET }}", "grant_type": "client_credentials"}' \
+            | jq -j '.access_token')
+
+          asset=$(curl -s --location --request POST 'https://anypoint.mulesoft.com/graph/api/v3/graphql' \
+            --header 'Content-Type: application/json' \
+            --header "Authorization: Bearer $token" \
+            --data-raw '{"query": "{assets(asset:{groupId:\"${{ env.assetGroup }}\", assetId:\"${{ env.assetId }}\", version:\"${{ env.assetVersion }}\"}){assetId version type}}"}')
+
+          echo "response = $asset"
+          echo "assetresponse=$asset" >> "$GITHUB_ENV"
+
+      # 🔐 Create Maven settings.xml if version is new
+      - name: Create settings.xml
+        uses: whelk-io/maven-settings-xml-action@v21
+        if: ${{ !contains(env.assetresponse, 'assetId') }}
+        with:
+          servers: >
+            [
+              {
+                "id": "gfs-anypoint-repository",
+                "username": "~~~Client~~~",
+                "password": "${{ secrets.CA_CLIENTID }}~?~${{ secrets.CA_CLIENTSECRET }}"
+              },
+              {
+                "id": "anypoint-exchange-v3",
+                "username": "~~~Client~~~",
+                "password": "${{ secrets.CA_CLIENTID }}~?~${{ secrets.CA_CLIENTSECRET }}"
+              }
+            ]
+
+      # ⚠️ Warn if the version already exists on Exchange
+      - name: Print warning message
+        if: ${{ github.ref_name == 'development' && contains(env.assetresponse, 'assetId') }}
+        run: |
+          echo "::warning file=pom.xml::Please be aware that you are deploying an existing version from Exchange!"
+
+      # 🚀 Build and deploy artifact to Exchange
+      - name: Publish to Exchange
+        if: ${{ !contains(env.assetresponse, 'assetId') }}
+        run: |
+          mvn deploy -DskipTests
+
+  # 🚀 Deploy to DEV if branch = development
+  deploy-dev:
+    needs: [build]
+    if: ${{ github.ref_name == 'develop' }}
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      environment: dev
+    secrets: inherit
+
+  # 🚀 Deploy to UAT if branch = uat
+  deploy-uat:
+    needs: [build]
+    if: ${{ github.ref_name == 'uat' }}
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      environment: uat
+    secrets: inherit
+
+  # 🚀 Deploy to PROD if branch = production
+  deploy-prod:
+    needs: [build]
+    if: ${{ github.ref_name == 'main' }}
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      environment: prod
+    secrets: inherit
