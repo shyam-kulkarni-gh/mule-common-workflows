@@ -98,7 +98,7 @@ jobs:
         run: |
           mvn deploy -DskipTests
 
-  # 🚀 Deploy to DEV if branch = development
+  # 🚀 Deploy to DEV if branch = develop
   deploy-dev:
     needs: [build]
     if: ${{ github.ref_name == 'develop' }}
@@ -116,7 +116,7 @@ jobs:
       environment: uat
     secrets: inherit
 
-  # 🚀 Deploy to PROD if branch = production
+  # 🚀 Deploy to PROD if branch = main
   deploy-prod:
     needs: [build]
     if: ${{ github.ref_name == 'main' }}

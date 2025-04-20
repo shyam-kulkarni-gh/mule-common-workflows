@@ -9,7 +9,7 @@ on:
         type: string
 
 jobs:
-  deploy-to-ch20:
+  deploy-to-ch2:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
 
